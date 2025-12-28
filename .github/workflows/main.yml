@@ -1,44 +1,41 @@
-name: Build IT Agent Mac
+name: Build IT Agent Universal
 
 on:
-  workflow_dispatch: # Cho phép bấm nút chạy thủ công
+  workflow_dispatch:
 
 jobs:
-  build:
-    runs-on: macos-latest # Yêu cầu máy chủ Mac
+  build-universal-compatible:
+    # QUAN TRỌNG NHẤT: Dùng macos-13 (đây là runner chạy chip Intel x86_64)
+    # Nó sẽ tạo ra file app chạy được trên cả Intel và Apple Silicon (qua Rosetta)
+    runs-on: macos-13
 
     steps:
-      # 1. Lấy code về
       - uses: actions/checkout@v4
 
-      # 2. Cài Python
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11' 
+          python-version: '3.11' # Python 3.11 tương thích tốt nhất hiện tại
 
-      # 3. Cài thư viện (từ file requirements.txt thầy đã up)
       - name: Install Dependencies
         run: |
           pip install --upgrade pip
-          pip install -r requirements.txt
+          # Cài thẳng thư viện cần thiết (khỏi lo thiếu file requirements.txt)
+          pip install psutil requests pyinstaller
 
-      # 4. Đóng gói ra file .app
-      - name: Build App
+      - name: Build App (Intel/Universal Mode)
         run: |
-          # --windowed: để chạy ẩn console
-          # --name: đặt tên file App
+          # Build ra file .app
           pyinstaller --noconfirm --onefile --windowed --name "IT_Device_Info_Agent" agent.py
 
-      # 5. Nén file lại (để thầy tải về được)
       - name: Zip App
         run: |
           cd dist
+          # Nén lại để giữ nguyên cấu trúc file Mac
           zip -r IT_Device_Info_Agent.zip IT_Device_Info_Agent.app
 
-      # 6. Upload file thành phẩm
       - name: Upload Result
         uses: actions/upload-artifact@v4
         with:
-          name: Mac-App-Final
+          name: Mac-App-Universal
           path: dist/IT_Device_Info_Agent.zip
