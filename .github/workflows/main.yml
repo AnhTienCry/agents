@@ -1,0 +1,41 @@
+name: Build IT Agent Universal
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-universal-compatible:
+    # Dùng server mới nhất (thường là chip M1/M2) để không bị lỗi Retired
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python (Force Intel)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          # QUAN TRỌNG: Ép cài Python bản Intel (x64)
+          # Nhờ vậy app build ra sẽ là bản Intel => Chạy được mọi máy
+          architecture: 'x64' 
+
+      - name: Install Dependencies
+        run: |
+          pip install --upgrade pip
+          pip install psutil requests pyinstaller
+
+      - name: Build App (Intel Mode via Rosetta)
+        run: |
+          # Build ra file .app
+          pyinstaller --noconfirm --onefile --windowed --name "IT_Device_Info_Agent" agent.py
+
+      - name: Zip App
+        run: |
+          cd dist
+          zip -r IT_Device_Info_Agent.zip IT_Device_Info_Agent.app
+
+      - name: Upload Result
+        uses: actions/upload-artifact@v4
+        with:
+          name: Mac-App-Universal
+          path: dist/IT_Device_Info_Agent.zip
