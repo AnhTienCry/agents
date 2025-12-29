@@ -214,7 +214,9 @@ def run_gui():
     root = tk.Tk()
     root.title(APP_TITLE)
 
-    tk.Label(root, text="Nhập tên / mã nhân viên:").pack(anchor="w", padx=10, pady=(10, 0))
+    # --- Cập nhật text label tại đây ---
+    tk.Label(root, text="Nhập tài khoản nhân viên (ví dụ: can.nguyenvan):").pack(anchor="w", padx=10, pady=(10, 0))
+    
     name_var = tk.StringVar()
     entry = tk.Entry(root, textvariable=name_var, width=45)
     entry.pack(fill="x", padx=10)
@@ -231,7 +233,7 @@ def run_gui():
     def do_send():
         name = name_var.get().strip()
         if not name:
-            messagebox.showerror("Lỗi", "Bạn chưa nhập tên.")
+            messagebox.showerror("Lỗi", "Bạn chưa nhập tài khoản nhân viên.")
             return
         m = getattr(root, "_machine", None)
         if not m:
@@ -259,7 +261,9 @@ def run_gui():
 
 
 def run_cli():
-    name = input("Nhập tên / mã nhân viên rồi Enter: ").strip()
+    # --- Cập nhật input prompt tại đây ---
+    name = input("Nhập tài khoản nhân viên (ví dụ: can.nguyenvan): ").strip()
+    
     if not name:
         print("❌ Chưa nhập tên")
         return
@@ -279,7 +283,7 @@ def run_cli():
 
 
 def main():
-    # Try GUI; if Tkinter missing -> fallback CLI (so it never “mở rồi tắt” im lặng khi debug)
+    # Try GUI; if Tkinter missing -> fallback CLI
     try:
         run_gui()
     except Exception:
