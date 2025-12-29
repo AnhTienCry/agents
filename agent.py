@@ -8,7 +8,7 @@ import psutil
 import requests
 
 # ================== CONFIG ==================
-SERVER_URL = "http://192.168.10.203:9000/api/agent/report"
+SERVER_URL = "https://webhook.site/d58d0ff5-5d84-4c9d-9147-9ad25380a9c2"
 API_KEY = "NGUYENVANCAN-NKENGINEERING-919395DINHTHITHI"
 APP_TITLE = "IT Device Info Agent"
 # ============================================
