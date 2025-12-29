@@ -4,176 +4,148 @@ import socket
 import subprocess
 from datetime import datetime, timezone
 
+# Cần cài thư viện: pip install psutil requests
 import psutil
 import requests
 
 # ================== CONFIG ==================
 SERVER_URL = "http://192.168.10.203:9000/api/agent/report"
 API_KEY = "NGUYENVANCAN-NKENGINEERING-919395DINHTHITHI"
-APP_TITLE = "IT Device Info Agent"
+APP_TITLE = "IT Device Info Agent v3.1" # Update version
+
+# Đường dẫn tuyệt đối cho lệnh macOS (Quan trọng để fix lỗi .app)
+MAC_CMD_SYSCTL = "/usr/sbin/sysctl"
+MAC_CMD_NETSETUP = "/usr/sbin/networksetup"
 # ============================================
 
 
-# ---------- helpers ----------
+# ---------- Helpers ----------
 def _run(cmd: list[str]) -> str:
+    """Chạy lệnh shell an toàn, ẩn window trên Windows"""
     try:
-        # Ẩn cửa sổ cmd trên Windows khi build .exe/.app
         startupinfo = None
         if platform.system() == "Windows":
             startupinfo = subprocess.STARTUPINFO()
             startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
             
-        out = subprocess.check_output(cmd, stderr=subprocess.DEVNULL, startupinfo=startupinfo)
+        out = subprocess.check_output(
+            cmd, 
+            stderr=subprocess.DEVNULL, 
+            startupinfo=startupinfo
+        )
         return out.decode(errors="ignore").strip()
     except Exception:
         return ""
 
 
-# ---------- CPU model (human readable) ----------
+# ---------- 1. CPU (cpu_model) ----------
 def get_cpu_model() -> str:
     sysname = platform.system()
 
     if sysname == "Windows":
         try:
             import winreg
-            key = winreg.OpenKey(
-                winreg.HKEY_LOCAL_MACHINE,
-                r"HARDWARE\DESCRIPTION\System\CentralProcessor\0",
-            )
+            key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"HARDWARE\DESCRIPTION\System\CentralProcessor\0")
             cpu_name, _ = winreg.QueryValueEx(key, "ProcessorNameString")
             return str(cpu_name).strip()
-        except Exception:
+        except:
             pass
 
-        cpu = platform.processor()
-        return cpu.strip() if cpu else "Unknown CPU"
+    if sysname == "Darwin":
+        # Dùng đường dẫn tuyệt đối
+        out = _run([MAC_CMD_SYSCTL, "-n", "machdep.cpu.brand_string"])
+        if out: return out
+        out = _run([MAC_CMD_SYSCTL, "-n", "hw.model"]) 
+        if out: return out
 
-    if sysname == "Darwin":  # macOS
-        # Fix: Thêm đường dẫn tuyệt đối cho sysctl
-        out = _run(["/usr/sbin/sysctl", "-n", "machdep.cpu.brand_string"])
-        if out:
-            return out
-        # Apple Silicon fallback
-        out = _run(["/usr/sbin/sysctl", "-n", "hw.model"])
-        if out:
-            return out
-        return "Unknown CPU"
-
-    # Linux/Ubuntu
+    # Linux fallback
     try:
         with open("/proc/cpuinfo", "r", encoding="utf-8", errors="ignore") as f:
             for line in f:
                 if "model name" in line.lower():
                     return line.split(":", 1)[1].strip()
-    except Exception:
+    except:
         pass
-
-    out = _run(["lscpu"])
-    if out:
-        for line in out.splitlines():
-            if "model name" in line.lower():
-                return line.split(":", 1)[1].strip()
-
-    cpu = platform.processor()
-    return cpu.strip() if cpu else "Unknown CPU"
+        
+    return platform.processor() or "Unknown CPU"
 
 
-# ---------- RAM ----------
+# ---------- 2. RAM (ram_gb) ----------
 def get_ram_gb() -> float:
-    return round(psutil.virtual_memory().total / (1024**3), 2)
-
-
-# ---------- "SSD capacity": system disk total ----------
-def get_system_disk_total_gb() -> float:
-    sysname = platform.system()
-
-    if sysname == "Windows":
-        # system drive (usually C:)
-        drive = os.environ.get("SystemDrive", "C:") + "\\"
-        try:
-            total = psutil.disk_usage(drive).total
-            return round(total / (1024**3), 2)
-        except Exception:
-            pass
-
-        # fallback: sum fixed partitions
-        total = 0
-        for part in psutil.disk_partitions(all=False):
-            try:
-                total += psutil.disk_usage(part.mountpoint).total
-            except Exception:
-                pass
-        return round(total / (1024**3), 2)
-
-    # macOS/Linux: root volume
     try:
-        total = psutil.disk_usage("/").total
-        return round(total / (1024**3), 2)
-    except Exception:
+        return round(psutil.virtual_memory().total / (1024**3), 2)
+    except:
         return 0.0
 
 
-# ---------- Wi-Fi MAC only (ĐÃ SỬA) ----------
-def get_wifi_mac() -> str:
+# ---------- 3. Disk (disk_total_gb) ----------
+def get_disk_gb() -> float:
+    try:
+        sysname = platform.system()
+        if sysname == "Windows":
+            drive = os.environ.get("SystemDrive", "C:") + "\\"
+            total = psutil.disk_usage(drive).total
+        else:
+            total = psutil.disk_usage("/").total
+        return round(total / (1024**3), 2)
+    except:
+        return 0.0
+
+
+# ---------- 4. MAC Address (wifi_mac) - ĐÃ FIX LỖI ----------
+def get_mac_address() -> str:
+    """
+    Logic: Ưu tiên tìm đúng interface thực (en0 trên Mac), tránh MAC ảo (bridge).
+    """
     sysname = platform.system()
 
-    # macOS: SỬA LẠI ĐỂ DÙNG ĐƯỜNG DẪN TUYỆT ĐỐI
+    # --- BƯỚC 1: Dùng lệnh hệ thống macOS để lấy en0 (Chính xác nhất) ---
     if sysname == "Darwin":
-        # Thêm /usr/sbin/ vào trước command để app tìm thấy lệnh
-        for iface in ["en0", "en1"]:
-            out = _run(["/usr/sbin/networksetup", "-getmacaddress", iface])
-            # format: "Ethernet Address: xx:xx:xx:xx:xx:xx"
-            if out and "Ethernet Address:" in out:
+        # Ưu tiên en0 (Wifi) rồi đến en1 (Ethernet)
+        for port in ["en0", "en1"]:
+            out = _run([MAC_CMD_NETSETUP, "-getmacaddress", port])
+            # Output mẫu: "Ethernet Address: f8:73:df:..."
+            if "Ethernet Address:" in out:
                 mac = out.split("Ethernet Address:")[-1].strip()
                 if len(mac) >= 11:
                     return mac.upper()
-        
-        # Quan trọng: Nếu đoạn trên fail (trả về rỗng), 
-        # KHÔNG return "" ngay mà để nó chạy xuống dưới dùng psutil fallback
 
-    if_addrs = psutil.net_if_addrs()
+    # --- BƯỚC 2: Dùng psutil (Windows/Fallback Mac) ---
+    try:
+        if_addrs = psutil.net_if_addrs()
+    except:
+        return "Unknown MAC"
 
-    # Windows
-    if sysname == "Windows":
-        keywords = ["wi-fi", "wifi", "wireless", "wlan"]
-        for iface, addrs in if_addrs.items():
-            low = iface.lower()
-            if any(k in low for k in keywords):
-                for a in addrs:
-                    mac = getattr(a, "address", "") or ""
-                    if mac and len(mac) >= 11 and (":" in mac or "-" in mac):
-                        return mac.upper()
-        return ""
-
-    # Linux & Fallback cho macOS (nếu networksetup ở trên lỗi)
-    preferred = []
-    for iface in if_addrs.keys():
-        low = iface.lower()
-        # macOS thường là en0 (wifi) nếu không phải en0 thì check wlan
-        if low == "wlan0" or low.startswith("wlp") or low == "en0":
-            preferred.append(iface)
-
-    # Check ưu tiên trước
-    for iface in preferred:
-        for a in if_addrs.get(iface, []):
-            # AF_LINK check cho chắc chắn là MAC
-            if a.family == psutil.AF_LINK: 
-                mac = getattr(a, "address", "") or ""
-                if mac and len(mac) >= 11 and (":" in mac or "-" in mac):
-                    return mac.upper()
+    # Danh sách tên interface ưu tiên
+    priority_names = ["en0", "en1", "wlan0", "wi-fi", "wireless", "eth0", "ethernet"]
     
-    # Nếu chưa thấy, lấy đại cái nào có MAC hợp lệ
-    for iface, addrs in if_addrs.items():
-        for a in addrs:
-            if a.family == psutil.AF_LINK:
-                mac = getattr(a, "address", "") or ""
-                if mac and len(mac) >= 11 and (":" in mac or "-" in mac):
+    # 2a. Quét tìm tên ưu tiên trước
+    for name in priority_names:
+        for oname in if_addrs.keys():
+            if name in oname.lower():
+                for snic in if_addrs[oname]:
+                    if snic.family == psutil.AF_LINK:
+                        mac = snic.address
+                        if mac and len(mac) >= 11:
+                            return mac.upper()
+
+    # 2b. Nếu không thấy, quét tất cả nhưng LOẠI BỎ rác (bridge, vmnet...)
+    skip_keywords = ["bridge", "vmnet", "vbox", "virtual", "utun", "awdl", "llw", "loopback"]
+    
+    for iface, snics in if_addrs.items():
+        if any(skip in iface.lower() for skip in skip_keywords):
+            continue
+            
+        for snic in snics:
+            if snic.family == psutil.AF_LINK:
+                mac = snic.address
+                if mac and len(mac) >= 11 and mac != "00:00:00:00:00:00":
                     return mac.upper()
 
-    return ""
+    return "Unknown MAC"
 
 
-# ---------- OS string ----------
+# ---------- OS String (os) ----------
 def get_os_string() -> str:
     sysname = platform.system()
     if sysname == "Darwin":
@@ -182,128 +154,125 @@ def get_os_string() -> str:
     return f"{sysname} {platform.release()}"
 
 
-# ---------- collect machine info ----------
-def collect_machine_info() -> dict:
-    ssd_gb = get_system_disk_total_gb()
+# ---------- TỔNG HỢP & GỬI ----------
+def collect_full_info() -> dict:
     return {
         "hostname": socket.gethostname(),
         "os": get_os_string(),
         "cpu_model": get_cpu_model(),
         "ram_gb": get_ram_gb(),
-        # gửi cả 2 key để server nào cũng nhận được
-        "ssd_total_gb": ssd_gb,
-        "disk_total_gb": ssd_gb,
-        "wifi_mac": get_wifi_mac(),
+        "disk_total_gb": get_disk_gb(),
+        "wifi_mac": get_mac_address(),
     }
 
 
-def format_info(m: dict) -> str:
+def format_display_text(m: dict) -> str:
+    # Hiển thị lên màn hình App
     return (
-        "========== THÔNG TIN MÁY ==========\n"
-        f"Hostname   : {m.get('hostname','')}\n"
-        f"OS         : {m.get('os','')}\n"
-        f"CPU        : {m.get('cpu_model','')}\n"
-        f"RAM (GB)   : {m.get('ram_gb','')}\n"
-        f"SSD (GB)   : {m.get('ssd_total_gb','')}\n"
-        f"WiFi MAC   : {m.get('wifi_mac','')}\n"
-        "==================================\n"
+        "========== THÔNG TIN THIẾT BỊ ==========\n"
+        f"1. Tên máy (hostname)    : {m['hostname']}\n"
+        f"2. Hệ điều hành (os)     : {m['os']}\n"
+        f"3. CPU (cpu_model)       : {m['cpu_model']}\n"
+        f"4. RAM (ram_gb)          : {m['ram_gb']} GB\n"
+        f"5. Disk (disk_total_gb)  : {m['disk_total_gb']} GB\n"
+        f"6. MAC (wifi_mac)        : {m['wifi_mac']}\n"
+        "=======================================\n"
     )
 
 
-def send_report(user_name: str, machine: dict) -> tuple[int, str]:
+def send_to_server(user_name: str, data: dict) -> tuple[int, str]:
+    # Chuẩn bị payload khớp 100% với cột Database
+    machine_payload = {
+        "hostname": data["hostname"],
+        "os": data["os"],
+        "cpu_model": data["cpu_model"],
+        "ram_gb": data["ram_gb"],
+        "disk_total_gb": data["disk_total_gb"], # Key này phải khớp tên cột DB
+        "wifi_mac": data["wifi_mac"]            # Key này phải khớp tên cột DB
+    }
+
     payload = {
-        "agentVersion": "3.0.0",
+        "agentVersion": "3.1.0",
         "submittedAt": datetime.now(timezone.utc).isoformat(),
         "userInputName": user_name,
-        "machine": machine,
+        "machine": machine_payload
     }
+    
     headers = {"X-API-Key": API_KEY, "Content-Type": "application/json"}
     try:
-        r = requests.post(SERVER_URL, json=payload, headers=headers, timeout=15)
+        r = requests.post(SERVER_URL, json=payload, headers=headers, timeout=20)
         return r.status_code, r.text
     except Exception as e:
         return 0, str(e)
 
 
-# ================== GUI (Tkinter) with fallback ==================
-def run_gui():
+# ================== GUI PROGRAM ==================
+def run_app():
     import tkinter as tk
     from tkinter import messagebox, scrolledtext
 
     root = tk.Tk()
     root.title(APP_TITLE)
+    
+    w, h = 600, 450
+    ws, hs = root.winfo_screenwidth(), root.winfo_screenheight()
+    x, y = (ws/2) - (w/2), (hs/2) - (h/2)
+    root.geometry(f'{w}x{h}+{int(x)}+{int(y)}')
 
-    tk.Label(root, text="Nhập tên / mã nhân viên:").pack(anchor="w", padx=10, pady=(10, 0))
+    lbl_frame = tk.Frame(root)
+    lbl_frame.pack(fill="x", padx=10, pady=10)
+    
+    tk.Label(lbl_frame, text="Nhập Tên / Mã Nhân Viên:", font=("Arial", 10, "bold")).pack(side="left")
+    
     name_var = tk.StringVar()
-    entry = tk.Entry(root, textvariable=name_var, width=45)
-    entry.pack(fill="x", padx=10)
+    entry_name = tk.Entry(lbl_frame, textvariable=name_var, font=("Arial", 11))
+    entry_name.pack(side="left", fill="x", expand=True, padx=(10, 0))
+    entry_name.focus()
 
-    info_box = scrolledtext.ScrolledText(root, height=12)
-    info_box.pack(fill="both", expand=True, padx=10, pady=10)
+    txt_info = scrolledtext.ScrolledText(root, font=("Consolas", 10), height=15)
+    txt_info.pack(fill="both", expand=True, padx=10, pady=5)
 
-    def refresh_info():
-        m = collect_machine_info()
-        root._machine = m
-        info_box.delete("1.0", tk.END)
-        info_box.insert(tk.END, format_info(m))
+    def load_data():
+        txt_info.delete("1.0", tk.END)
+        txt_info.insert(tk.END, "Đang quét thông tin phần cứng...\n")
+        root.update()
+        
+        data = collect_full_info()
+        root._scanned_data = data 
+        
+        display_str = format_display_text(data)
+        txt_info.delete("1.0", tk.END)
+        txt_info.insert(tk.END, display_str)
 
-    def do_send():
+    def on_send():
         name = name_var.get().strip()
         if not name:
-            messagebox.showerror("Lỗi", "Bạn chưa nhập tên.")
+            messagebox.showwarning("Thiếu thông tin", "Vui lòng nhập tên/mã nhân viên!")
+            entry_name.focus()
             return
-        m = getattr(root, "_machine", None)
-        if not m:
-            refresh_info()
-            m = getattr(root, "_machine", None)
+            
+        if not hasattr(root, "_scanned_data"):
+            load_data()
+            
+        data = getattr(root, "_scanned_data")
+        
+        code, resp = send_to_server(name, data)
+        if code == 200:
+            messagebox.showinfo("Thành công", "✅ Đã gửi báo cáo thành công!")
+        else:
+            messagebox.showerror("Thất bại", f"Lỗi gửi (Code {code}):\n{resp}")
 
-        try:
-            code, text = send_report(name, m)
-            if code == 200:
-                messagebox.showinfo("OK", "✅ Đã gửi thông tin cho bộ phận IT nhé")
-            else:
-                messagebox.showerror("Lỗi", f"Gửi thất bại ({code}): {text[:200]}")
-        except Exception as e:
-            messagebox.showerror("Lỗi", str(e))
+    btn_frame = tk.Frame(root, pady=10)
+    btn_frame.pack(fill="x")
 
-    btns = tk.Frame(root)
-    btns.pack(pady=(0, 10))
+    btn_scan = tk.Button(btn_frame, text="🔄 Quét Lại", command=load_data, height=2, width=15)
+    btn_scan.pack(side="left", padx=20)
+    
+    btn_send = tk.Button(btn_frame, text="📤 Gửi Báo Cáo", command=on_send, height=2, width=15, bg="#4CAF50", fg="white")
+    btn_send.pack(side="right", padx=20)
 
-    tk.Button(btns, text="Lấy thông tin", command=refresh_info, width=16).pack(side="left", padx=5)
-    tk.Button(btns, text="Gửi", command=do_send, width=10).pack(side="left", padx=5)
-
-    refresh_info()
-    entry.focus()
+    root.after(100, load_data)
     root.mainloop()
 
-
-def run_cli():
-    name = input("Nhập tên / mã nhân viên rồi Enter: ").strip()
-    if not name:
-        print("❌ Chưa nhập tên")
-        return
-    m = collect_machine_info()
-    print(format_info(m))
-
-    try:
-        code, text = send_report(name, m)
-        if code == 200:
-            print("✅ Đã gửi thông tin cho bộ phận IT nhé")
-        else:
-            print(f"❌ Gửi thất bại ({code}): {text}")
-    except Exception as e:
-        print("❌ Lỗi gửi dữ liệu:", e)
-
-    input("Nhấn Enter để thoát...")
-
-
-def main():
-    # Try GUI; if Tkinter missing -> fallback CLI
-    try:
-        run_gui()
-    except Exception:
-        run_cli()
-
-
 if __name__ == "__main__":
-    main()
+    run_app()
